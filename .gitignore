@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Env
+.env
+
+# ComfyUI models
+*.ckpt
+*.safetensors
+*.pt
+
+# Large files
+*.zip
+*.mp4
+
+# OS
+.DS_Store# Python
+__pycache__/
+*.pyc
+venv/
+
+# Env
+.env
+
+# ComfyUI models
+*.ckpt
+*.safetensors
+*.pt
+
+# Large files
+*.zip
+*.mp4
+
+# OS
+.DS_Store# Python
+__pycache__/
+*.pyc
+venv/
+
+# Env
+.env
+
+# ComfyUI models
+*.ckpt
+*.safetensors
+*.pt
+
+# Large files
+*.zip
+*.mp4
+
+# OS
+.DS_Store# Python
+__pycache__/
+*.pyc
+venv/
+
+# Env
+.env
+
+# ComfyUI models
+*.ckpt
+*.safetensors
+*.pt
+
+# Large files
+*.zip
+*.mp4
+
+# OS
+.DS_Store
