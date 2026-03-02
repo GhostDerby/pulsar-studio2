@@ -1,5 +1,34 @@
 __pycache__/
 *.pyc
+*.pyo
 .env
 venv/
+.venv/
 .DS_Store
+
+# Local test data
+tmp/
+src/tmp/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Build
+dist/
+build/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# OS
+Thumbs.db

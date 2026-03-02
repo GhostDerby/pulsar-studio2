@@ -1,4 +1,5 @@
 import logging
+import math
 from dataclasses import dataclass
 
 logger = logging.getLogger("FinOps")
@@ -53,11 +54,15 @@ class PricingEngine:
 
         final_price = total_cogs / (1 - margin_target)
 
+        # Round up to nearest cent to guarantee price >= cogs
+        final_price_rounded = math.ceil(final_price * 100) / 100
+
         return CostBreakdown(
             compute_cost=round(compute_cost, 5),
             ai_inference_cost=round(ai_cost, 5),
             storage_cost=self.BASE_OVERHEAD,
             total_cogs=round(total_cogs, 4),
-            suggested_price=round(final_price, 2),
+            suggested_price=final_price_rounded,
             margin_percent=round(margin_target * 100, 1),
         )
+

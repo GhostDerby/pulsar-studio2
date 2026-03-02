@@ -1,11 +1,14 @@
 import os
 import json
 import time
+import uuid
 import logging
 from typing import Any, Dict, List
 
 from flask import Flask, request, jsonify
-from google.cloud import pubsub_v1, storage
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from shared.pricing_engine import PricingEngine
 from shared.contracts import JobSpec, SceneSpec, PricingSpec
@@ -14,10 +17,16 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("node-a")
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "brazil-studio-v2")
+LOCAL_MOCK = os.environ.get("LOCAL_MOCK", "0") == "1"
+
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "pulsar-studio-prod")
 REGION = os.environ.get("REGION", "us-central1")
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "brazil-studio-assets")
+BUCKET_NAME = os.environ.get("BUCKET_NAME", "pulsar-studio-assets")
 TOPIC_NAME = os.environ.get("PUBSUB_TOPIC", "pulsar-jobs")
+LOCAL_JOBS_DIR = os.environ.get("LOCAL_JOBS_DIR", "./tmp/jobs")
+
+if not LOCAL_MOCK:
+    from google.cloud import pubsub_v1, storage
 
 pricing = PricingEngine()
 
@@ -30,6 +39,18 @@ def gcs_job_spec_path(job_id: str) -> str:
     return f"{gcs_job_prefix(job_id)}/job.json"
 
 
+# ── Local mock helpers ──────────────────────────────────────────────
+def save_json_locally(job_id: str, payload: Dict[str, Any]) -> str:
+    job_dir = os.path.join(LOCAL_JOBS_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    path = os.path.join(job_dir, "job.json")
+    with open(path, "w") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    logger.info("[MOCK] Saved job spec → %s", path)
+    return f"file://{os.path.abspath(path)}"
+
+
+# ── GCS helpers (real mode) ─────────────────────────────────────────
 def upload_json_to_gcs(bucket_name: str, blob_path: str, payload: Dict[str, Any]) -> str:
     client = storage.Client()
     bucket = client.bucket(bucket_name)
@@ -39,6 +60,9 @@ def upload_json_to_gcs(bucket_name: str, blob_path: str, payload: Dict[str, Any]
 
 
 def publish_job_message(job_id: str, stage: str, spec_uri: str) -> None:
+    if LOCAL_MOCK:
+        logger.info("[MOCK] Pub/Sub skipped — stage=%s job=%s", stage, job_id)
+        return
     publisher = pubsub_v1.PublisherClient()
     topic_path = publisher.topic_path(PROJECT_ID, TOPIC_NAME)
     message = {
@@ -75,7 +99,7 @@ def create_job():
     target_margin = 0.60 if mode == "hollywood" else 0.50
     financials = pricing.calculate_job_budget(mode, len(scenes), target_margin)
 
-    job_id = f"job_{int(time.time())}"
+    job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 
     job_spec = JobSpec(
         job_id=job_id,
@@ -91,7 +115,11 @@ def create_job():
         ),
     )
 
-    spec_uri = upload_json_to_gcs(BUCKET_NAME, gcs_job_spec_path(job_id), job_spec.to_dict())
+    # ── Persist job spec ────────────────────────────────────────────
+    if LOCAL_MOCK:
+        spec_uri = save_json_locally(job_id, job_spec.to_dict())
+    else:
+        spec_uri = upload_json_to_gcs(BUCKET_NAME, gcs_job_spec_path(job_id), job_spec.to_dict())
 
     publish_job_message(job_id=job_id, stage="job_created", spec_uri=spec_uri)
 
@@ -108,8 +136,9 @@ def create_job():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "bucket": BUCKET_NAME, "topic": TOPIC_NAME}), 200
+    return jsonify({"status": "ok", "bucket": BUCKET_NAME, "topic": TOPIC_NAME, "local_mock": LOCAL_MOCK}), 200
 
 
 if __name__ == "__main__":
+    logger.info("Starting Node A (LOCAL_MOCK=%s)", LOCAL_MOCK)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

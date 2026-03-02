@@ -7,15 +7,23 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, request
-from google.cloud import storage, pubsub_v1
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("node-b")
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "brazil-studio-v2")
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "brazil-studio-assets")
+LOCAL_MOCK = os.environ.get("LOCAL_MOCK", "0") == "1"
+
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "pulsar-studio-prod")
+BUCKET_NAME = os.environ.get("BUCKET_NAME", "pulsar-studio-assets")
 TOPIC_NAME = os.environ.get("PUBSUB_TOPIC", "pulsar-jobs")
+LOCAL_JOBS_DIR = os.environ.get("LOCAL_JOBS_DIR", "./tmp/jobs")
+
+if not LOCAL_MOCK:
+    from google.cloud import storage, pubsub_v1
 
 
 def parse_pubsub_envelope(envelope: Dict[str, Any]) -> Dict[str, Any]:
@@ -26,11 +34,11 @@ def parse_pubsub_envelope(envelope: Dict[str, Any]) -> Dict[str, Any]:
     return json.loads(base64.b64decode(data_b64).decode("utf-8"))
 
 
-def gcs_list_prefix(bucket: storage.Bucket, prefix: str) -> List[storage.Blob]:
+def gcs_list_prefix(bucket, prefix: str) -> list:
     return list(bucket.list_blobs(prefix=prefix))
 
 
-def gcs_download_blobs(bucket: storage.Bucket, blobs: List[storage.Blob], local_dir: str) -> List[str]:
+def gcs_download_blobs(bucket, blobs: list, local_dir: str) -> List[str]:
     paths = []
     for b in blobs:
         if b.name.endswith("/"):
@@ -42,13 +50,13 @@ def gcs_download_blobs(bucket: storage.Bucket, blobs: List[storage.Blob], local_
     return sorted(paths)
 
 
-def gcs_upload_file(bucket: storage.Bucket, local_path: str, blob_path: str, content_type: str) -> str:
+def gcs_upload_file(bucket, local_path: str, blob_path: str, content_type: str) -> str:
     blob = bucket.blob(blob_path)
     blob.upload_from_filename(local_path, content_type=content_type)
     return f"gs://{bucket.name}/{blob_path}"
 
 
-def gcs_upload_json(bucket: storage.Bucket, blob_path: str, payload: Dict[str, Any]) -> str:
+def gcs_upload_json(bucket, blob_path: str, payload: Dict[str, Any]) -> str:
     blob = bucket.blob(blob_path)
     blob.upload_from_string(json.dumps(payload, ensure_ascii=False, indent=2), content_type="application/json")
     return f"gs://{bucket.name}/{blob_path}"
@@ -71,11 +79,35 @@ def download_watermark_from_gcs(gcs_uri: str) -> str:
 
 
 def publish_stage(job_id: str, stage: str, spec_uri: str) -> None:
+    if LOCAL_MOCK:
+        logger.info("[MOCK] Pub/Sub skipped — stage=%s job=%s", stage, job_id)
+        return
     publisher = pubsub_v1.PublisherClient()
     topic_path = publisher.topic_path(PROJECT_ID, TOPIC_NAME)
     message = {"job_id": job_id, "bucket": BUCKET_NAME, "stage": stage, "spec_uri": spec_uri}
     publisher.publish(topic_path, json.dumps(message).encode("utf-8"))
     logger.info("Published stage=%s for job=%s", stage, job_id)
+
+
+# ── Local mock helpers ──────────────────────────────────────────────
+def local_save_result(job_id: str, result: Dict[str, Any]) -> str:
+    result_dir = os.path.join(LOCAL_JOBS_DIR, job_id, "final")
+    os.makedirs(result_dir, exist_ok=True)
+    path = os.path.join(result_dir, "result.json")
+    with open(path, "w") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    logger.info("[MOCK] Saved result → %s", path)
+    return path
+
+
+def local_list_dir(prefix: str) -> List[str]:
+    """List files under LOCAL_JOBS_DIR/<prefix>/ if the directory exists."""
+    full = os.path.join(LOCAL_JOBS_DIR, prefix)
+    if not os.path.isdir(full):
+        return []
+    return sorted(
+        os.path.join(full, f) for f in os.listdir(full) if os.path.isfile(os.path.join(full, f))
+    )
 
 
 def ffmpeg_concat_scenes(scene_paths: List[str], music_path: Optional[str], out_path: str) -> None:
@@ -216,12 +248,92 @@ def receive_message():
     spec_uri = payload.get("spec_uri") or ""
     bucket_name = payload.get("bucket", BUCKET_NAME)
 
+    if not job_id or not stage:
+        logger.warning("Missing job_id or stage in payload: %s", payload)
+        return "Bad Request: missing job_id or stage", 400
+
     logger.info("Job=%s stage=%s", job_id, stage)
 
     # Simple v0.1: assemble only on assets_ready
     if stage != "assets_ready":
+        logger.info("Stage '%s' != 'assets_ready' — skipping assembly, acknowledging OK", stage)
         return "OK", 200
 
+    if LOCAL_MOCK:
+        return _handle_assembly_local(job_id, spec_uri)
+    else:
+        return _handle_assembly_gcs(job_id, spec_uri, bucket_name)
+
+
+def _handle_assembly_local(job_id: str, spec_uri: str):
+    """Local mock assembly: reads from ./tmp/jobs/{job_id}/"""
+    job_base = job_id  # e.g. job_1234567890
+    scenes_dir = os.path.join(job_base, "scenes")
+    frames_dir = os.path.join(job_base, "frames")
+    audio_dir = os.path.join(job_base, "audio")
+
+    scene_paths = local_list_dir(scenes_dir)
+    frame_paths = local_list_dir(frames_dir)
+    audio_paths = local_list_dir(audio_dir)
+
+    music_path = None
+    for p in audio_paths:
+        if os.path.basename(p).lower().endswith((".mp3", ".wav", ".m4a")) and "music" in os.path.basename(p).lower():
+            music_path = p
+            break
+
+    result_dir = os.path.join(LOCAL_JOBS_DIR, job_id, "final")
+    os.makedirs(result_dir, exist_ok=True)
+    out_path = os.path.join(result_dir, "video.mp4")
+
+    try:
+        if scene_paths:
+            ffmpeg_concat_scenes(scene_paths, music_path, out_path)
+        elif frame_paths:
+            ffmpeg_frames_to_pseudomotion(frame_paths, music_path, out_path)
+        else:
+            logger.warning("[MOCK] No scenes/ or frames/ found locally for %s — creating stub result", job_id)
+            result = {
+                "job_id": job_id,
+                "status": "success_stub",
+                "message": "No media assets yet — pipeline acknowledged the job correctly",
+                "final_video_uri": None,
+                "artifacts": {},
+                "metrics": {},
+                "errors": [],
+            }
+            local_save_result(job_id, result)
+            publish_stage(job_id, "done", spec_uri)
+            return "OK", 200
+
+        result = {
+            "job_id": job_id,
+            "status": "success",
+            "final_video_uri": f"file://{os.path.abspath(out_path)}",
+            "artifacts": {},
+            "metrics": {},
+            "errors": [],
+        }
+        local_save_result(job_id, result)
+        publish_stage(job_id, "done", spec_uri)
+
+    except Exception as e:
+        logger.exception("Assembly failed")
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "final_video_uri": None,
+            "artifacts": {},
+            "metrics": {},
+            "errors": [str(e)],
+        }
+        local_save_result(job_id, result)
+
+    return "OK", 200
+
+
+def _handle_assembly_gcs(job_id: str, spec_uri: str, bucket_name: str):
+    """Real GCS-based assembly (production path)."""
     client = storage.Client()
     bucket = client.bucket(bucket_name)
 
@@ -296,8 +408,10 @@ def receive_message():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return {"status": "ok"}, 200
+    return {"status": "ok", "local_mock": LOCAL_MOCK}, 200
 
 
 if __name__ == "__main__":
+    logger.info("Starting Node B (LOCAL_MOCK=%s)", LOCAL_MOCK)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+

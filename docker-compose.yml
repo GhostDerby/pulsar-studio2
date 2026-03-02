@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  node-a:
+    build:
+      context: .
+      dockerfile: src/node_a/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-pulsar-studio-prod}
+      - BUCKET_NAME=${BUCKET_NAME:-pulsar-studio-assets}
+      - PUBSUB_TOPIC=${PUBSUB_TOPIC:-pulsar-jobs}
+      - LOCAL_MOCK=${LOCAL_MOCK:-0}
+      - LOCAL_JOBS_DIR=/app/tmp/jobs
+    volumes:
+      - job-data:/app/tmp/jobs
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  node-b:
+    build:
+      context: .
+      dockerfile: src/node_b/Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-pulsar-studio-prod}
+      - BUCKET_NAME=${BUCKET_NAME:-pulsar-studio-assets}
+      - PUBSUB_TOPIC=${PUBSUB_TOPIC:-pulsar-jobs}
+      - LOCAL_MOCK=${LOCAL_MOCK:-0}
+      - LOCAL_JOBS_DIR=/app/tmp/jobs
+      - WATERMARK_ENABLED=${WATERMARK_ENABLED:-1}
+      - WATERMARK_TEXT=${WATERMARK_TEXT:-PULSAR STUDIO}
+      - WATERMARK_POSITION=${WATERMARK_POSITION:-bottom}
+      - WATERMARK_PNG_GCS_URI=${WATERMARK_PNG_GCS_URI:-}
+    volumes:
+      - job-data:/app/tmp/jobs
+    depends_on:
+      node-a:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8081/health" ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  job-data:
